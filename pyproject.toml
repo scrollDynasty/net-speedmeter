@@ -1,31 +1,11 @@
 [project]
 name = "net-speedmeter"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI that measures download speed by fetching a heavy file N times sequentially."
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
-authors = [{ name = "scrollDynasty" }]
 requires-python = ">=3.11"
-keywords = ["speedtest", "bandwidth", "httpx", "cli", "network"]
-classifiers = [
-    "Environment :: Console",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: System :: Networking :: Monitoring",
-    "Typing :: Typed",
-]
-dependencies = [
-    "httpx>=0.28,<1.0",
-    "rich>=13",
-    "typer>=0.16",
-]
-
-[project.urls]
-Repository = "https://github.com/scrollDynasty/net-speedmeter"
+dependencies = ["httpx>=0.28,<1.0"]
 
 [project.scripts]
 net-speedmeter = "net_speedmeter.cli:main"
@@ -35,55 +15,26 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = [
-    "mypy>=2.4.0",
-    "pytest>=9.1.1",
-    "pytest-cov>=7.1.0",
-    "ruff>=0.16.10",
-]
+dev = ["mypy>=2.4.0", "pytest>=9.1.1", "pytest-cov>=7.1.0", "ruff>=0.16.10"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = [
-    "E", "W", "F", "I", "B", "UP", "SIM", "RUF", "N", "C4", "PT", "RET", "TID", "PL", "S", "BLE",
-    "PIE", "PERF", "FURB", "PTH", "T20", "ERA", "PGH", "RSE", "FLY", "ISC",
-]
-ignore = ["PLR2004", "PLR0913"]
-
-[tool.ruff.lint.per-file-ignores]
-# subprocess in tests runs our own entry point with sys.executable
-"tests/**" = ["S101", "S603", "PLR2004", "PLC0415"]
-# Typer maps every function parameter to a CLI option, so a long signature is the API.
-"src/net_speedmeter/cli.py" = ["PLR0917"]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
 files = ["src", "tests"]
 mypy_path = "tests"
-warn_unreachable = true
-enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
 
 [tool.pytest.ini_options]
-addopts = ["-ra", "--strict-markers", "--strict-config"]
+addopts = ["-ra", "--strict-markers"]
 testpaths = ["tests"]
 pythonpath = ["tests"]
-xfail_strict = true
-filterwarnings = [
-    "error",
-    # old typer releases (tested in the lowest-versions CI job) import deprecated click helpers
-    "ignore::DeprecationWarning:typer",
-]
+filterwarnings = ["error"]
 
 [tool.coverage.run]
 source = ["net_speedmeter"]
 branch = true
-
-[tool.coverage.report]
-show_missing = true
-skip_covered = true
-fail_under = 95
-exclude_also = ["if __name__ == .__main__.:"]

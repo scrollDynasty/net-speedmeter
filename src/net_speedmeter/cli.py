@@ -1,308 +1,118 @@
-"""Command-line interface: ``net-speedmeter [URL] [-n 10] [--json]``."""
+"""Command line: ``net-speedmeter [URL] [-n 10]``."""
 
 from __future__ import annotations
 
-import json
-from enum import IntEnum
-from typing import Annotated, Any
+import argparse
+import io
+import sys
+from collections.abc import Sequence
 
-import typer
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    DownloadColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-    TransferSpeedColumn,
-)
-from rich.text import Text
+import httpx
 
-from net_speedmeter._version import __version__
-from net_speedmeter.measure import (
-    DEFAULT_COUNT,
-    DEFAULT_TIMEOUT,
-    DEFAULT_URL,
-    MAX_COUNT,
-    MIN_TIMEOUT,
-    iter_benchmark,
-    validate_url,
-)
-from net_speedmeter.models import RequestResult, Summary
-from net_speedmeter.stats import summarize
-from net_speedmeter.units import format_bytes, format_duration, to_mbit_per_s, to_mbyte_per_s
+from net_speedmeter import __version__
+from net_speedmeter.measure import RequestResult, benchmark
+from net_speedmeter.stats import Summary, summarize
 
-JSON_SCHEMA_VERSION = 1
+DEFAULT_URL = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg"
+MAX_COUNT = 1000
+MEGA = 1_000_000  # SI prefixes, as ISPs use: 1 MB/s = 10**6 B/s = 8 Mbit/s
+EXIT_OK, EXIT_FAILED, EXIT_INTERRUPTED = 0, 1, 130  # 2 = bad arguments (argparse)
 
 
-class ExitCode(IntEnum):
-    OK = 0
-    PARTIAL_FAILURE = 1
-    USAGE = 2  # reserved by Click for bad arguments
-    ALL_FAILED = 3
-    ERROR = 4  # broken environment: bad proxy settings, missing CA bundle, ...
-    INTERRUPTED = 130  # conventional 128 + SIGINT
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="net-speedmeter",
+        description="Download URL N times in a row and print the average request time, "
+        "downloaded volume and speed in MB/s.",
+        epilog="Exit codes: 0 all requests succeeded, 1 some failed, 2 bad arguments, "
+        "130 interrupted (Ctrl+C).",
+    )
+    parser.add_argument(
+        "url",
+        nargs="?",
+        default=DEFAULT_URL,
+        metavar="URL",
+        help="heavy file to download (default: a 14.7 MB photo from Wikimedia Commons)",
+    )
+    parser.add_argument(
+        "-n", "--count", type=int, default=10, help="number of sequential requests (default: 10)"
+    )
+    args = parser.parse_args(argv)
 
-
-EPILOG = (
-    "Examples:  net-speedmeter -n 3 | "
-    'net-speedmeter "https://speed.cloudflare.com/__down?bytes=25000000" | '
-    "net-speedmeter --json | jq .summary.speed_mbyte_s"
-    "\n\n"
-    "Exit codes: 0 all ok, 1 some requests failed, 2 bad arguments, "
-    "3 all requests failed, 4 environment error, 130 interrupted."
-)
-
-app = typer.Typer(
-    add_completion=False,
-    context_settings={"help_option_names": ["-h", "--help"]},
-    help=(
-        "Measure download speed: fetch URL N times sequentially, then report the average "
-        "request time, downloaded volume and speed in MB/s and Mbit/s."
-    ),
-)
-
-
-def _url_callback(value: str) -> str:
+    if not 1 <= args.count <= MAX_COUNT:
+        parser.error(f"--count must be between 1 and {MAX_COUNT}")
     try:
-        return validate_url(value)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        url = httpx.URL(args.url)
+    except httpx.InvalidURL as exc:
+        parser.error(f"invalid URL: {exc}")
+    if url.scheme not in {"http", "https"} or not url.host:
+        parser.error(f"URL must be an absolute http(s) address, got {args.url!r}")
+    return args
 
 
-def _version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"net-speedmeter {__version__}")
-        raise typer.Exit
+def _speed(bytes_per_second: float) -> str:
+    return f"{bytes_per_second / MEGA:.2f} MB/s ({bytes_per_second * 8 / MEGA:.2f} Mbit/s)"
 
 
-@app.command(epilog=EPILOG)
-def run(
-    url: Annotated[
-        str,
-        typer.Argument(
-            metavar="URL",
-            show_default=False,
-            help=(
-                "URL of a heavy file to download (an image, a .bin, ...). "
-                "Default: a 14.7 MB photo from Wikimedia Commons."
-            ),
-            callback=_url_callback,
-        ),
-    ] = DEFAULT_URL,
-    count: Annotated[
-        int,
-        typer.Option("--count", "-n", min=1, max=MAX_COUNT, help="Number of sequential requests."),
-    ] = DEFAULT_COUNT,
-    timeout: Annotated[
-        float,
-        typer.Option(
-            min=MIN_TIMEOUT,
-            help="Timeout in seconds for each network operation (connect, each read).",
-        ),
-    ] = DEFAULT_TIMEOUT,
-    keepalive: Annotated[
-        bool,
-        typer.Option(
-            "--keepalive/--no-keepalive",
-            help="Reuse one connection or open a fresh one for every request.",
-        ),
-    ] = True,
-    json_output: Annotated[
-        bool,
-        typer.Option("--json", help="Print machine-readable JSON instead of human output."),
-    ] = False,
-    version: Annotated[
-        bool | None,
-        typer.Option(
-            "--version",
-            callback=_version_callback,
-            is_eager=True,
-            help="Show version and exit.",
-        ),
-    ] = None,
-) -> None:
-    """Download URL several times in a row and report the average speed."""
-    console = Console(highlight=False)
-
-    if not json_output:
-        mode = "keep-alive" if keepalive else "new connection per request"
-        console.print(Text(f"net-speedmeter {__version__}", style="bold"))
-        console.print(Text(f"URL:      {url}"), soft_wrap=True)
-        console.print(Text(f"Requests: {count} sequential GET, {mode}"), soft_wrap=True)
-        console.print()
-
-    results: list[RequestResult] = []
-    interrupted = False
-    progress = Progress(
-        TextColumn("{task.description}", markup=False),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TimeElapsedColumn(),
-        console=console,
-        transient=True,
-        disable=json_output or not console.is_terminal,
-    )
-    with progress:
-        task = progress.add_task("connecting", total=None)
-
-        def on_progress(index: int, done: int, total: int | None) -> None:
-            progress.update(task, description=f"[{index:>2}/{count}]", completed=done, total=total)
-
-        try:
-            for result in iter_benchmark(
-                url,
-                count=count,
-                timeout=timeout,
-                keepalive=keepalive,
-                # no per-chunk callback at all when nothing is rendered
-                on_progress=None if progress.disable else on_progress,
-            ):
-                results.append(result)
-                progress.reset(task, description="connecting", total=None)
-                if not json_output:
-                    console.print(_format_result(result, count), soft_wrap=True)
-        except KeyboardInterrupt:
-            interrupted = True
-        # Broken environment, e.g. a malformed HTTPS_PROXY (ValueError) or a missing
-        # SSL_CERT_FILE (OSError). Anything else is a bug and keeps its traceback.
-        except (ValueError, OSError) as exc:
-            progress.stop()
-            typer.echo(f"error: {type(exc).__name__}: {exc}", err=True)
-            raise typer.Exit(ExitCode.ERROR) from exc
-
-    summary = summarize(results)
-    if json_output:
-        report = _to_json(
-            url=url, keepalive=keepalive, interrupted=interrupted, results=results, summary=summary
-        )
-        typer.echo(json.dumps(report, indent=2))
-    else:
-        _print_summary(console, summary, keepalive=keepalive, interrupted=interrupted)
-
-    raise typer.Exit(_exit_code(summary, interrupted=interrupted))
-
-
-def _exit_code(summary: Summary, *, interrupted: bool) -> ExitCode:
-    if interrupted:
-        return ExitCode.INTERRUPTED
-    if summary.succeeded == 0:
-        return ExitCode.ALL_FAILED
-    if summary.failed:
-        return ExitCode.PARTIAL_FAILURE
-    return ExitCode.OK
-
-
-def _speed_pair(bytes_per_second: float) -> str:
-    return (
-        f"{to_mbyte_per_s(bytes_per_second):.2f} MB/s "
-        f"= {to_mbit_per_s(bytes_per_second):.2f} Mbit/s"
-    )
-
-
-def _format_result(result: RequestResult, count: int) -> Text:
-    prefix = f"[{result.index:>2}/{count}] "
-    if not result.ok:
-        return Text(prefix + f"FAILED  {result.error}", style="red")
+def format_result(result: RequestResult, count: int) -> str:
+    prefix = f"[{result.index:>2}/{count}]"
+    if not result.ok or result.ttfb is None:
+        return f"{prefix} FAILED  {result.error}"
     speed = result.speed or 0.0
-    ttfb = format_duration(result.ttfb) if result.ttfb is not None else "-"
-    return Text(
-        prefix
-        + f"{result.status_code}  {format_bytes(result.bytes_downloaded):>9}  "
-        + f"{format_duration(result.request_time):>9}  "
-        + f"TTFB {ttfb:>8}  "
-        + f"{to_mbyte_per_s(speed):>7.2f} MB/s  {to_mbit_per_s(speed):>8.2f} Mbit/s"
+    return (
+        f"{prefix} {result.status_code}  {result.bytes_downloaded / MEGA:8.2f} MB  "
+        f"{result.request_time:8.3f} s  TTFB {result.ttfb * 1000:5.0f} ms  "
+        f"{speed / MEGA:7.2f} MB/s"
     )
 
 
-_LABEL_WIDTH = 18
-
-
-def _row(label: str, value: str, *, style: str = "", note: str = "") -> Text:
-    text = Text(f"{label:<{_LABEL_WIDTH}}", style="bold")
-    text.append(value, style=style)
-    if note:
-        text.append(f"  ({note})", style="dim")
-    return text
-
-
-def _summary_rows(summary: Summary, *, keepalive: bool) -> list[Text]:
-    """What the task asks for, plus the one extra that changes the conclusion.
-
-    Body-only speed and per-request percentiles stay in ``--json``.
-    """
+def format_summary(summary: Summary) -> list[str]:
     requests = f"{summary.succeeded}/{summary.total} succeeded"
     if summary.failed:
         requests += f", {summary.failed} failed"
-    rows = [
-        _row("Requests", requests, style="red" if summary.failed else "green"),
-        _row("Downloaded", f"{format_bytes(summary.total_bytes)} ({summary.total_bytes:,} bytes)"),
+    lines = [
+        f"Requests          {requests}",
+        f"Downloaded        {summary.total_bytes / MEGA:.2f} MB ({summary.total_bytes:,} bytes)",
     ]
-    if (rt := summary.request_time) is not None:
-        rows.append(_row("Avg request time", format_duration(rt.mean), style="bold"))
-        if rt.stdev is not None:
-            rows.append(
-                _row(
-                    "Spread",
-                    f"min {format_duration(rt.minimum)}, median {format_duration(rt.median)}, "
-                    f"max {format_duration(rt.maximum)}",
-                )
-            )
-    if summary.ttfb is not None:
-        rows.append(_row("Avg TTFB", format_duration(summary.ttfb.mean)))
-    if summary.throughput is None:
-        rows.append(_row("Speed", "n/a", style="red", note="no successful requests"))
-        return rows
-
-    rows.append(
-        _row(
-            "Speed",
-            _speed_pair(summary.throughput),
-            style="bold cyan",
-            note="total bytes / total time",
-        )
-    )
-    # Only meaningful when later requests reuse the connection #1 opened.
-    if keepalive and summary.first_request is not None:
-        rest = summary.throughput_excluding_first
-        if rest is not None:
-            rows.append(
-                _row("Without #1", _speed_pair(rest), note="excludes connection set-up and warm-up")
-            )
-    return rows
+    if summary.avg_request_time is not None:
+        lines.append(f"Avg request time  {summary.avg_request_time:.3f} s")
+    if summary.avg_ttfb is not None:
+        lines.append(f"Avg TTFB          {summary.avg_ttfb * 1000:.0f} ms")
+    if summary.speed is None:
+        lines.append("Speed             n/a (no successful requests)")
+        return lines
+    lines.append(f"Speed             {_speed(summary.speed)}  <- total bytes / total time")
+    if summary.speed_without_first is not None:
+        lines.append(f"Without #1        {_speed(summary.speed_without_first)}")
+    return lines
 
 
-def _print_summary(
-    console: Console, summary: Summary, *, keepalive: bool, interrupted: bool
-) -> None:
-    console.print()
-    console.print(Text("Summary", style="bold underline"))
-    for row in _summary_rows(summary, keepalive=keepalive):
-        console.print(row, soft_wrap=True)
+def main(argv: Sequence[str] | None = None) -> int:
+    # A redirected stdout on Windows may be cp1251: never crash on a non-ASCII URL.
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="backslashreplace")
+
+    args = _parse_args(argv)
+    noun = "request" if args.count == 1 else "requests"
+    print(f"net-speedmeter {__version__}: {args.count} sequential GET {noun}")
+    print(f"URL: {args.url}\n", flush=True)
+
+    results: list[RequestResult] = []
+    interrupted = False
+    try:
+        for result in benchmark(args.url, args.count):
+            results.append(result)
+            print(format_result(result, args.count), flush=True)
+            if result.index == 1 and result.final_url not in (None, args.url):
+                print(f"        redirected to {result.final_url}; next requests go there")
+    except KeyboardInterrupt:
+        interrupted = True
+
+    summary = summarize(results)
+    print()
+    print("\n".join(format_summary(summary)))
     if interrupted:
-        console.print(
-            Text("Interrupted by user: summary covers finished requests only.", style="yellow")
-        )
-
-
-def _to_json(
-    *,
-    url: str,
-    keepalive: bool,
-    interrupted: bool,
-    results: list[RequestResult],
-    summary: Summary,
-) -> dict[str, Any]:
-    return {
-        "schema_version": JSON_SCHEMA_VERSION,
-        "url": url,
-        "keepalive": keepalive,
-        "interrupted": interrupted,
-        "requests": [r.to_dict() for r in results],
-        "summary": summary.to_dict(),
-    }
-
-
-def main() -> None:
-    app()
+        print("Interrupted: the summary covers finished requests only.")
+        return EXIT_INTERRUPTED
+    return EXIT_FAILED if summary.failed or not summary.succeeded else EXIT_OK

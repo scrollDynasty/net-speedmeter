@@ -1,90 +1,74 @@
-"""HTTP download measurement.
+"""Download a URL several times in a row and time every request.
 
-Design notes (the README section "Методика" has the long version):
-
-* the body is streamed with ``iter_raw()`` and thrown away as it arrives, so a
-  100 MB file never sits in memory. No re-chunking: httpcore already reads the
-  socket in 64 KiB pieces, and re-slicing them into bigger chunks only adds
-  copies (measured: ~25% lower throughput on a fast local link);
-* the volume is the HTTP body as it came off the wire (``num_bytes_downloaded``,
+* The body is streamed with ``iter_raw()`` and thrown away as it arrives, so a
+  large file never sits in memory.
+* The volume is the HTTP body as it came off the wire (``num_bytes_downloaded``,
   before any decompression); ``Accept-Encoding: identity`` asks the server not
-  to compress at all, otherwise gzip would distort it;
-* timestamps come from ``time.perf_counter`` (monotonic, high resolution),
-  never from the wall clock.
+  to compress at all.
+* Timestamps come from ``time.perf_counter`` (monotonic, high resolution).
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator
-from typing import TypeAlias
+from dataclasses import dataclass
 
 import httpx
 
-from net_speedmeter._version import __version__
-from net_speedmeter.models import RequestResult
+from net_speedmeter import __version__
 
-DEFAULT_URL = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg"
-DEFAULT_COUNT = 10
-MAX_COUNT = 1000
-DEFAULT_TIMEOUT = 30.0
-MIN_TIMEOUT = 0.1
+TIMEOUT = 30.0  # seconds per network operation (connect, each read), not per download
 
-# Wikimedia (and some CDNs) reject anonymous clients; their policy asks for
-# "<client>/<version> (<contact>) <library>/<version>".
+# Wikimedia rejects anonymous clients; its policy asks for "<client>/<version> (<contact>)".
 USER_AGENT = (
     f"net-speedmeter/{__version__} "
     f"(+https://github.com/scrollDynasty/net-speedmeter) httpx/{httpx.__version__}"
 )
 
-Clock: TypeAlias = Callable[[], float]
-ProgressCallback: TypeAlias = Callable[[int, int, int | None], None]
-"""Called as ``(request_index, bytes_downloaded, total_bytes_or_None)``."""
+Clock = Callable[[], float]
 
 
-def validate_url(url: str) -> str:
-    """Return ``url`` unchanged if it is an absolute http(s) URL, else raise ``ValueError``."""
-    try:
-        parsed = httpx.URL(url)
-    except httpx.InvalidURL as exc:
-        raise ValueError(f"invalid URL {url!r}: {exc}") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.host:
-        raise ValueError(f"URL must be an absolute http(s) address, got {url!r}")
-    return url
+@dataclass(frozen=True, slots=True)
+class RequestResult:
+    """One GET request; ``error is None`` means success.
 
-
-def build_client(
-    *,
-    timeout: float = DEFAULT_TIMEOUT,
-    keepalive: bool = True,
-    transport: httpx.BaseTransport | None = None,
-) -> httpx.Client:
-    """HTTP client tuned for measuring, not for being clever.
-
-    ``keepalive=False`` disables connection pooling so every request pays for
-    DNS + TCP + TLS again - useful to compare "cold" vs "warm" numbers.
-
-    Note: when a custom ``transport`` is given, httpx ignores ``limits`` and
-    proxy environment variables - the transport is used as is.
+    Times are in seconds from the start of the request (on a new connection
+    that includes DNS + TCP + TLS, and redirect hops if any):
+    ``ttfb`` until the response headers, ``request_time`` until the last body byte.
     """
+
+    index: int
+    status_code: int | None
+    bytes_downloaded: int
+    request_time: float
+    ttfb: float | None
+    final_url: str | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    @property
+    def speed(self) -> float | None:
+        """Bytes per second, ``None`` for failed or instant requests."""
+        if not self.ok or self.request_time <= 0:
+            return None
+        return self.bytes_downloaded / self.request_time
+
+
+def build_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
     return httpx.Client(
         headers={
             "User-Agent": USER_AGENT,
             "Accept-Encoding": "identity",
             "Cache-Control": "no-cache",
         },
-        # connect/read/write/pool timeouts apply per operation, so a slow but
-        # steadily progressing download is not killed halfway through.
-        timeout=httpx.Timeout(timeout),
-        limits=httpx.Limits(max_connections=1, max_keepalive_connections=1 if keepalive else 0),
+        timeout=TIMEOUT,
         follow_redirects=True,
         transport=transport,
     )
-
-
-def _describe_error(exc: Exception) -> str:
-    message = str(exc)
-    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def _content_length(response: httpx.Response) -> int | None:
@@ -95,102 +79,59 @@ def _content_length(response: httpx.Response) -> int | None:
     return None
 
 
+def _describe(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
 def measure_once(
-    client: httpx.Client,
-    url: str,
-    *,
-    index: int,
-    clock: Clock = time.perf_counter,
-    on_progress: ProgressCallback | None = None,
+    client: httpx.Client, url: str, *, index: int, clock: Clock = time.perf_counter
 ) -> RequestResult:
-    """Download ``url`` once and time it. Network/HTTP errors are returned, not raised."""
-    status_code: int | None = None
+    """Download ``url`` once. Network and HTTP errors are returned, not raised."""
+    status: int | None = None
     ttfb: float | None = None
     downloaded = 0
 
     def failure(error: str, elapsed: float) -> RequestResult:
-        return RequestResult(
-            index=index,
-            status_code=status_code,
-            bytes_downloaded=downloaded,
-            request_time=elapsed,
-            ttfb=ttfb,
-            error=error,
-        )
+        return RequestResult(index, status, downloaded, elapsed, ttfb, error=error)
 
     start = clock()
     try:
         with client.stream("GET", url) as response:
             ttfb = clock() - start
-            status_code = response.status_code
+            status = response.status_code
             if not response.is_success:
-                error = f"HTTP {status_code} {response.reason_phrase}".rstrip()
+                response.read()  # drain the (small) error body so keep-alive survives
+                error = f"HTTP {status} {response.reason_phrase}".rstrip()
                 return failure(error, ttfb)
-
             expected = _content_length(response)
-            for _chunk in response.iter_raw():
-                downloaded = response.num_bytes_downloaded
-                if on_progress is not None:
-                    on_progress(index, downloaded, expected)
+            for _ in response.iter_raw():
+                pass
             elapsed = clock() - start
             downloaded = response.num_bytes_downloaded
+            final_url = str(response.url)
     except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as exc:
-        return failure(_describe_error(exc), clock() - start)
+        return failure(_describe(exc), clock() - start)
 
     if expected is not None and downloaded != expected:
         return failure(f"incomplete body: got {downloaded} of {expected} bytes", elapsed)
-
-    return RequestResult(
-        index=index,
-        status_code=status_code,
-        bytes_downloaded=downloaded,
-        request_time=elapsed,
-        ttfb=ttfb,
-    )
+    return RequestResult(index, status, downloaded, elapsed, ttfb, final_url=final_url)
 
 
-def iter_benchmark(
+def benchmark(
     url: str,
+    count: int = 10,
     *,
-    count: int = DEFAULT_COUNT,
-    timeout: float = DEFAULT_TIMEOUT,
-    keepalive: bool = True,
     transport: httpx.BaseTransport | None = None,
     clock: Clock = time.perf_counter,
-    on_progress: ProgressCallback | None = None,
 ) -> Iterator[RequestResult]:
-    """Run ``count`` sequential downloads, yielding each result as soon as it is ready.
+    """Run ``count`` sequential downloads over one keep-alive client.
 
-    Arguments are validated immediately (not on the first ``next()``). Being a
-    generator lets the caller render results live; a caller that collects them
-    one by one keeps the finished ones on interruption (the CLI does so for Ctrl+C).
+    If the first request was redirected, the rest go straight to the final URL:
+    a redirect to another host would otherwise cost a new connection every time.
     """
-    validate_url(url)
-    if not 1 <= count <= MAX_COUNT:
-        raise ValueError(f"count must be between 1 and {MAX_COUNT}, got {count}")
-    if timeout < MIN_TIMEOUT:
-        raise ValueError(f"timeout must be >= {MIN_TIMEOUT} s, got {timeout}")
-    return _run(
-        url,
-        count=count,
-        timeout=timeout,
-        keepalive=keepalive,
-        transport=transport,
-        clock=clock,
-        on_progress=on_progress,
-    )
-
-
-def _run(
-    url: str,
-    *,
-    count: int,
-    timeout: float,
-    keepalive: bool,
-    transport: httpx.BaseTransport | None,
-    clock: Clock,
-    on_progress: ProgressCallback | None,
-) -> Iterator[RequestResult]:
-    with build_client(timeout=timeout, keepalive=keepalive, transport=transport) as client:
+    with build_client(transport) as client:
         for index in range(1, count + 1):
-            yield measure_once(client, url, index=index, clock=clock, on_progress=on_progress)
+            result = measure_once(client, url, index=index, clock=clock)
+            if index == 1 and result.final_url is not None:
+                url = result.final_url
+            yield result

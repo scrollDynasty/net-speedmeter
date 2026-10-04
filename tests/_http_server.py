@@ -22,6 +22,7 @@ _CHUNK = 64 * 1024
 class ServerState:
     base_url: str
     connections_opened: int = 0
+    requests_handled: int = 0
     flaky_hits: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -61,12 +62,17 @@ class _Handler(BaseHTTPRequestHandler):
             remaining -= len(part)
 
     def _send_status(self, status: int) -> None:
+        # A small body, like a real error page: the client must drain it to keep the connection.
+        body = f"error {status}".encode()
         self.send_response(status)
-        self.send_header("Content-Length", "0")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self) -> None:
         state = self.server.state
+        with state.lock:
+            state.requests_handled += 1
         parts = urlsplit(self.path)
         query = parse_qs(parts.query)
 
@@ -80,6 +86,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_status(503)
             else:
                 self._send_body(FILE_SIZE)
+        elif parts.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", query["to"][0])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif parts.path == "/truncated":
             self.send_response(200)
             self.send_header("Content-Length", "1000")
