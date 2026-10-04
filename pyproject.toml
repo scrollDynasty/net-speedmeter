@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.28,<1.0",
     "rich>=13",
-    "typer>=0.15",
+    "typer>=0.16",
 ]
 
 [project.urls]
@@ -39,7 +39,6 @@ dev = [
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "pytest-httpserver>=1.1.5",
     "ruff>=0.16.10",
 ]
 
