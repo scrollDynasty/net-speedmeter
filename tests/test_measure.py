@@ -169,3 +169,38 @@ def test_url_normalisation_is_not_a_redirect() -> None:
 
     assert result.ok
     assert result.redirected_to is None
+
+
+def test_redirect_is_remembered_after_the_first_successful_request() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/old.jpg":
+            return httpx.Response(302, headers={"Location": URL})
+        # the target fails once: request #1 fails after the redirect
+        return streamed(b"busy", 503) if paths.count("/big.jpg") == 1 else streamed()
+
+    results = list(
+        benchmark("https://example.test/old.jpg", 3, transport=httpx.MockTransport(handler))
+    )
+
+    assert [r.ok for r in results] == [False, True, True]
+    assert paths == ["/old.jpg", "/big.jpg", "/old.jpg", "/big.jpg", "/big.jpg"]
+
+
+def test_huge_error_body_is_not_downloaded() -> None:
+    page = ChunkedStream(b"x" * 10_000_000)
+    served: list[int] = []
+
+    class Counting(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            for chunk in page:
+                served.append(len(chunk))
+                yield chunk
+
+    with client_for(lambda request: httpx.Response(500, stream=Counting())) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert result.error == "HTTP 500 Internal Server Error"
+    assert sum(served) < 1_000_000  # gave up after ~64 KiB instead of reading 10 MB

@@ -19,6 +19,7 @@ import httpx
 from net_speedmeter import __version__
 
 TIMEOUT = 30.0  # seconds per network operation (connect, each read), not per download
+MAX_ERROR_BODY = 64 * 1024  # drain error pages up to this size to keep the connection
 
 # Wikimedia rejects anonymous clients; its policy asks for "<client>/<version> (<contact>)".
 USER_AGENT = (
@@ -93,7 +94,11 @@ def measure_once(
             ttfb = clock() - start
             status = response.status_code
             if not response.is_success:
-                response.read()  # drain the (small) error body so keep-alive survives
+                # Drain a small error page so the keep-alive connection survives;
+                # a huge one is cheaper to abandon together with the connection.
+                for _ in response.iter_raw():
+                    if response.num_bytes_downloaded > MAX_ERROR_BODY:
+                        break
                 error = f"HTTP {status} {response.reason_phrase}".rstrip()
                 return failure(error, ttfb)
             for _ in response.iter_raw():
@@ -117,12 +122,13 @@ def benchmark(
 ) -> Iterator[RequestResult]:
     """Run ``count`` sequential downloads over one keep-alive client.
 
-    If the first request was redirected, the rest go straight to the final URL:
-    a redirect to another host would otherwise cost a new connection every time.
+    Once a request succeeds through a redirect, the rest go straight to the final
+    URL: otherwise every request would pay for the extra hop (and, for another
+    host, for a new connection).
     """
     with build_client(transport) as client:
         for index in range(1, count + 1):
             result = measure_once(client, url, index=index, clock=clock)
-            if index == 1 and result.redirected_to is not None:
+            if result.redirected_to is not None:
                 url = result.redirected_to
             yield result

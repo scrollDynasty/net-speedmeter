@@ -165,3 +165,23 @@ def test_output_to_a_non_utf8_file_does_not_crash(monkeypatch: pytest.MonkeyPatc
 
     sys.stdout.flush()
     assert "https://example.test/日本.jpg" in buffer.getvalue().decode("utf-8")
+
+
+def test_small_file_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_benchmark(monkeypatch, [ok(1, nbytes=70_000), ok(2, nbytes=70_000)])
+
+    cli.main([URL, "-n", "2"])
+
+    assert "the file is under 1 MB" in capsys.readouterr().out
+
+
+def test_no_small_file_warning_for_a_heavy_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_benchmark(monkeypatch, [ok(1)])
+
+    cli.main([URL, "-n", "1"])
+
+    assert "Note:" not in capsys.readouterr().out

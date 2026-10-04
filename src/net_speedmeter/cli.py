@@ -16,6 +16,7 @@ from net_speedmeter.stats import Summary, summarize
 DEFAULT_URL = "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg"
 MAX_COUNT = 1000
 MEGA = 1_000_000  # SI prefixes, as ISPs use: 1 MB/s = 10**6 B/s = 8 Mbit/s
+SMALL_FILE = MEGA  # below this, a request is mostly latency, not bandwidth
 EXIT_OK, EXIT_FAILED, EXIT_INTERRUPTED = 0, 1, 130  # 2 = bad arguments (argparse)
 
 
@@ -81,9 +82,13 @@ def format_summary(summary: Summary) -> list[str]:
     if summary.speed is None:
         lines.append("Speed             n/a (no successful requests)")
         return lines
-    lines.append(f"Speed             {_speed(summary.speed)}  <- total bytes / total time")
+    lines.append(f"Speed             {_speed(summary.speed)}")
     if summary.speed_without_first is not None:
         lines.append(f"Without #1        {_speed(summary.speed_without_first)}")
+    if summary.total_bytes / summary.succeeded < SMALL_FILE:
+        lines.append(
+            "Note: the file is under 1 MB, so the speed mostly reflects latency; use 10+ MB."
+        )
     return lines
 
 
@@ -106,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for result in benchmark(args.url, args.count):
             results.append(result)
             print(format_result(result, args.count), flush=True)
-            if result.index == 1 and result.redirected_to is not None:
+            if result.redirected_to is not None:
                 print(f"        redirected to {result.redirected_to}; next requests go there")
     except KeyboardInterrupt:
         interrupted = True
