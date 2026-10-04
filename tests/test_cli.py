@@ -1,3 +1,4 @@
+import io
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -85,11 +86,22 @@ def test_nothing_succeeded(
 def test_redirect_is_reported(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    fake_benchmark(monkeypatch, [ok(1)])
+    fake_benchmark(monkeypatch, [ok(1, redirected_to="https://cdn.example.test/a.jpg")])
 
     cli.main(["https://example.test/old", "-n", "1"])
 
-    assert "redirected to https://example.test/a.jpg" in capsys.readouterr().out
+    assert "redirected to https://cdn.example.test/a.jpg" in capsys.readouterr().out
+
+
+def test_no_redirect_line_without_a_redirect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # httpx normalises e.g. the host case or non-ASCII paths; that is not a redirect
+    fake_benchmark(monkeypatch, [ok(1)])
+
+    cli.main(["https://EXAMPLE.test/café.jpg", "-n", "1"])
+
+    assert "redirected" not in capsys.readouterr().out
 
 
 def test_ctrl_c_prints_a_partial_summary(
@@ -100,7 +112,7 @@ def test_ctrl_c_prints_a_partial_summary(
     assert cli.main([URL]) == 130
     out = capsys.readouterr().out
     assert "1/1 succeeded" in out
-    assert "Interrupted" in out
+    assert "Interrupted after 1 of 10 requests." in out
 
 
 @pytest.mark.parametrize(
@@ -141,3 +153,15 @@ def test_runs_as_a_module_against_a_real_server(http_server: ServerState) -> Non
     assert completed.returncode == 0, completed.stderr
     assert f"net-speedmeter {__version__}" in completed.stdout
     assert "2/2 succeeded" in completed.stdout
+
+
+def test_output_to_a_non_utf8_file_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows: stdout redirected to a file defaults to the ANSI code page (e.g. cp1251)
+    buffer = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(buffer, encoding="cp1251"))
+    fake_benchmark(monkeypatch, [ok(1)])
+
+    cli.main(["https://example.test/日本.jpg", "-n", "1"])
+
+    sys.stdout.flush()
+    assert "https://example.test/日本.jpg" in buffer.getvalue().decode("utf-8")

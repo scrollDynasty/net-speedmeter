@@ -30,7 +30,7 @@ def test_cross_host_redirect_is_resolved_once(http_server: ServerState) -> None:
         results = list(benchmark(url, 5))
 
     assert all(r.ok for r in results)
-    assert results[0].final_url == cdn.url("/file")
+    assert results[0].redirected_to == cdn.url("/file")
     # only request #1 pays for the redirect hop; the rest go straight to the final URL
     assert http_server.requests_handled == 1
     assert cdn.requests_handled == 5

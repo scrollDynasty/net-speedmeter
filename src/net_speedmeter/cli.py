@@ -88,10 +88,12 @@ def format_summary(summary: Summary) -> list[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    # A redirected stdout on Windows may be cp1251: never crash on a non-ASCII URL.
+    # Redirected to a file on Windows, stdout would be cp1251 and crash on a non-ASCII URL:
+    # write files as UTF-8, and never fail on a character the console cannot show.
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
-            stream.reconfigure(errors="backslashreplace")
+            encoding = None if stream.isatty() else "utf-8"
+            stream.reconfigure(encoding=encoding, errors="backslashreplace")
 
     args = _parse_args(argv)
     noun = "request" if args.count == 1 else "requests"
@@ -104,8 +106,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for result in benchmark(args.url, args.count):
             results.append(result)
             print(format_result(result, args.count), flush=True)
-            if result.index == 1 and result.final_url not in (None, args.url):
-                print(f"        redirected to {result.final_url}; next requests go there")
+            if result.index == 1 and result.redirected_to is not None:
+                print(f"        redirected to {result.redirected_to}; next requests go there")
     except KeyboardInterrupt:
         interrupted = True
 
@@ -113,6 +115,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     print()
     print("\n".join(format_summary(summary)))
     if interrupted:
-        print("Interrupted: the summary covers finished requests only.")
+        print(f"Interrupted after {len(results)} of {args.count} requests.")
         return EXIT_INTERRUPTED
     return EXIT_FAILED if summary.failed or not summary.succeeded else EXIT_OK

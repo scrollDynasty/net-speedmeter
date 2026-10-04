@@ -43,7 +43,8 @@ class RequestResult:
     bytes_downloaded: int
     request_time: float
     ttfb: float | None
-    final_url: str | None = None
+    redirected_to: str | None = None
+    """Final URL, set only if the request was actually redirected."""
     error: str | None = None
 
     @property
@@ -71,14 +72,6 @@ def build_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
     )
 
 
-def _content_length(response: httpx.Response) -> int | None:
-    value = response.headers.get("Content-Length")
-    # isdigit() alone would accept e.g. "²" (superscript two) and then crash in int()
-    if value is not None and value.isascii() and value.isdecimal():
-        return int(value)
-    return None
-
-
 def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
@@ -103,18 +96,16 @@ def measure_once(
                 response.read()  # drain the (small) error body so keep-alive survives
                 error = f"HTTP {status} {response.reason_phrase}".rstrip()
                 return failure(error, ttfb)
-            expected = _content_length(response)
             for _ in response.iter_raw():
                 pass
             elapsed = clock() - start
+            # A body cut short of Content-Length is already an error in httpx (h11).
             downloaded = response.num_bytes_downloaded
-            final_url = str(response.url)
+            redirected_to = str(response.url) if response.history else None
     except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as exc:
         return failure(_describe(exc), clock() - start)
 
-    if expected is not None and downloaded != expected:
-        return failure(f"incomplete body: got {downloaded} of {expected} bytes", elapsed)
-    return RequestResult(index, status, downloaded, elapsed, ttfb, final_url=final_url)
+    return RequestResult(index, status, downloaded, elapsed, ttfb, redirected_to=redirected_to)
 
 
 def benchmark(
@@ -132,6 +123,6 @@ def benchmark(
     with build_client(transport) as client:
         for index in range(1, count + 1):
             result = measure_once(client, url, index=index, clock=clock)
-            if index == 1 and result.final_url is not None:
-                url = result.final_url
+            if index == 1 and result.redirected_to is not None:
+                url = result.redirected_to
             yield result

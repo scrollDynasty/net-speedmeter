@@ -62,7 +62,7 @@ def test_success_records_bytes_and_timings() -> None:
     assert result.ttfb == pytest.approx(0.5)
     assert result.request_time == pytest.approx(1.0)
     assert result.speed == pytest.approx(len(BODY))
-    assert result.final_url == URL
+    assert result.redirected_to is None  # no redirect happened
 
 
 def test_sends_measurement_friendly_headers() -> None:
@@ -143,34 +143,6 @@ def test_invalid_url_is_captured() -> None:
     assert result.error.startswith("InvalidURL")
 
 
-@pytest.mark.parametrize(("declared", "sent"), [(1000, 400), (400, 500)])
-def test_content_length_mismatch_is_a_failed_request(declared: int, sent: int) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, headers={"Content-Length": str(declared)}, stream=ChunkedStream(b"x" * sent)
-        )
-
-    with client_for(handler) as client:
-        result = measure_once(client, URL, index=1)
-
-    assert result.error == f"incomplete body: got {sent} of {declared} bytes"
-
-
-@pytest.mark.parametrize("header", [b"\xb2", "٣".encode(), b"12abc", b"-5"])
-def test_malformed_content_length_is_ignored(header: bytes) -> None:
-    # "²" and the Arabic-Indic "٣" pass str.isdigit(), but int() would choke on them.
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, headers=[(b"Content-Length", header)], stream=ChunkedStream(BODY)
-        )
-
-    with client_for(handler) as client:
-        result = measure_once(client, URL, index=1)
-
-    assert result.ok
-    assert result.bytes_downloaded == len(BODY)
-
-
 def test_benchmark_is_sequential_and_follows_the_first_redirect_once() -> None:
     paths: list[str] = []
 
@@ -185,6 +157,15 @@ def test_benchmark_is_sequential_and_follows_the_first_redirect_once() -> None:
     )
 
     assert [r.index for r in results] == [1, 2, 3]
+    assert results[0].redirected_to == URL
     assert all(r.ok and r.bytes_downloaded == len(BODY) for r in results)
     # only request #1 pays for the redirect; #2 and #3 go straight to the final URL
     assert paths == ["/old.jpg", "/big.jpg", "/big.jpg", "/big.jpg"]
+
+
+def test_url_normalisation_is_not_a_redirect() -> None:
+    with client_for(lambda request: streamed()) as client:
+        result = measure_once(client, "https://EXAMPLE.test/café.jpg", index=1)
+
+    assert result.ok
+    assert result.redirected_to is None

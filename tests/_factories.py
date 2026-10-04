@@ -4,11 +4,13 @@ from net_speedmeter.measure import RequestResult
 
 
 def ok(
-    index: int, nbytes: int = 5_000_000, request_time: float = 1.0, ttfb: float = 0.1
+    index: int,
+    nbytes: int = 5_000_000,
+    request_time: float = 1.0,
+    ttfb: float = 0.1,
+    redirected_to: str | None = None,
 ) -> RequestResult:
-    return RequestResult(
-        index, 200, nbytes, request_time, ttfb, final_url="https://example.test/a.jpg"
-    )
+    return RequestResult(index, 200, nbytes, request_time, ttfb, redirected_to=redirected_to)
 
 
 def failed(index: int, *, request_time: float = 0.5, ttfb: float | None = None) -> RequestResult:
