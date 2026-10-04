@@ -162,8 +162,8 @@ def iter_benchmark(
     """Run ``count`` sequential downloads, yielding each result as soon as it is ready.
 
     Arguments are validated immediately (not on the first ``next()``). Being a
-    generator lets the caller render results live and still keep the finished
-    ones if the run is interrupted with Ctrl+C or a task time limit.
+    generator lets the caller render results live; a caller that collects them
+    one by one keeps the finished ones on interruption (the CLI does so for Ctrl+C).
     """
     validate_url(url)
     if not 1 <= count <= MAX_COUNT:

@@ -226,6 +226,10 @@ def _row(label: str, value: str, *, style: str = "", note: str = "") -> Text:
 
 
 def _summary_rows(summary: Summary, *, keepalive: bool) -> list[Text]:
+    """What the task asks for, plus the one extra that changes the conclusion.
+
+    Body-only speed and per-request percentiles stay in ``--json``.
+    """
     requests = f"{summary.succeeded}/{summary.total} succeeded"
     if summary.failed:
         requests += f", {summary.failed} failed"
@@ -234,15 +238,15 @@ def _summary_rows(summary: Summary, *, keepalive: bool) -> list[Text]:
         _row("Downloaded", f"{format_bytes(summary.total_bytes)} ({summary.total_bytes:,} bytes)"),
     ]
     if (rt := summary.request_time) is not None:
-        stdev = "n/a" if rt.stdev is None else format_duration(rt.stdev)
-        rows += [
-            _row("Avg request time", format_duration(rt.mean), style="bold"),
-            _row(
-                "Spread",
-                f"min {format_duration(rt.minimum)}, median {format_duration(rt.median)}, "
-                f"max {format_duration(rt.maximum)}, stdev {stdev}",
-            ),
-        ]
+        rows.append(_row("Avg request time", format_duration(rt.mean), style="bold"))
+        if rt.stdev is not None:
+            rows.append(
+                _row(
+                    "Spread",
+                    f"min {format_duration(rt.minimum)}, median {format_duration(rt.median)}, "
+                    f"max {format_duration(rt.maximum)}",
+                )
+            )
     if summary.ttfb is not None:
         rows.append(_row("Avg TTFB", format_duration(summary.ttfb.mean)))
     if summary.throughput is None:
@@ -254,30 +258,16 @@ def _summary_rows(summary: Summary, *, keepalive: bool) -> list[Text]:
             "Speed",
             _speed_pair(summary.throughput),
             style="bold cyan",
-            note="all requests: total bytes / total time",
+            note="total bytes / total time",
         )
     )
-    first = summary.first_request
-    if first is not None and summary.throughput_excluding_first is not None:
-        note = (
-            "#1 includes DNS+TCP+TLS and TCP slow start"
-            if keepalive
-            else "every request opens a new connection"
-        )
-        rows.append(_row("Without #1", _speed_pair(summary.throughput_excluding_first), note=note))
-    if summary.transfer_throughput is not None:
-        rows.append(
-            _row("Body transfer", _speed_pair(summary.transfer_throughput), note="excluding TTFB")
-        )
-    if (sp := summary.speed) is not None:
-        rows.append(
-            _row(
-                "Per-request",
-                f"median {to_mbyte_per_s(sp.median):.2f} / p90 {to_mbyte_per_s(sp.p90):.2f} / "
-                f"min {to_mbyte_per_s(sp.minimum):.2f} / max {to_mbyte_per_s(sp.maximum):.2f} "
-                "MB/s",
+    # Only meaningful when later requests reuse the connection #1 opened.
+    if keepalive and summary.first_request is not None:
+        rest = summary.throughput_excluding_first
+        if rest is not None:
+            rows.append(
+                _row("Without #1", _speed_pair(rest), note="excludes connection set-up and warm-up")
             )
-        )
     return rows
 
 

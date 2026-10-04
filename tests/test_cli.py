@@ -165,12 +165,24 @@ def test_human_numbers_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Without #1        5.00 MB/s = 40.00 Mbit/s" in out
 
 
-def test_single_request_has_no_stdev(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_single_request_shows_no_spread(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_benchmark(monkeypatch, [ok(1)])
 
     result = runner.invoke(app, [URL, "-n", "1"])
 
-    assert "stdev n/a" in result.output
+    assert "Avg request time  1.000 s" in result.output
+    assert "Spread" not in result.output
+    assert "Without #1" not in result.output
+
+
+def test_without_first_is_hidden_when_every_request_is_cold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_benchmark(monkeypatch, [ok(1, request_time=4.0), ok(2), ok(3)])
+
+    result = runner.invoke(app, [URL, "-n", "3", "--no-keepalive"])
+
+    assert "Speed             2.50 MB/s" in result.output
     assert "Without #1" not in result.output
 
 
