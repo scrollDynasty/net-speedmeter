@@ -5,6 +5,8 @@ import httpx
 import pytest
 
 from net_speedmeter.measure import (
+    MAX_COUNT,
+    MIN_TIMEOUT,
     USER_AGENT,
     build_client,
     iter_benchmark,
@@ -291,3 +293,46 @@ def test_malformed_content_length_is_ignored(header: bytes) -> None:
 
     assert result.ok
     assert result.bytes_downloaded == len(BODY)
+
+
+def test_unfollowed_3xx_is_a_failure() -> None:
+    with client_for(serve(b"", status=304)) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert not result.ok
+    assert result.error == "HTTP 304 Not Modified"
+
+
+def test_unknown_status_has_no_trailing_space() -> None:
+    with client_for(serve(b"", status=599)) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert result.error == "HTTP 599"
+
+
+def test_invalid_url_passed_directly_is_a_failed_request() -> None:
+    with client_for(serve()) as client:
+        result = measure_once(client, "http://exa\x00mple.test/", index=1)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.startswith("InvalidURL")
+
+
+def test_stream_error_is_a_failed_request() -> None:
+    class Broken(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"x"
+            raise httpx.StreamClosed
+
+    with client_for(lambda request: httpx.Response(200, stream=Broken())) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.startswith("StreamClosed")
+
+
+def test_iter_benchmark_accepts_boundary_values() -> None:
+    iter_benchmark(URL, count=MAX_COUNT)
+    iter_benchmark(URL, timeout=MIN_TIMEOUT)

@@ -44,6 +44,7 @@ def test_format_bytes(value: int, expected: str) -> None:
         (0.0004, "0.4 ms"),
         (0.045, "45.0 ms"),
         (0.9994, "999.4 ms"),
+        (0.9996, "999.6 ms"),  # rounding to whole ms would print "1000 ms"
         (0.99996, "1.000 s"),  # must not render as "1000.0 ms"
         (1.0, "1.000 s"),
         (12.3456, "12.346 s"),

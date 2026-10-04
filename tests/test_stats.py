@@ -180,3 +180,28 @@ def test_request_to_dict() -> None:
         "speed_mbit_s": 40.0,
         "error": None,
     }
+
+
+def test_summary_to_dict_maps_every_field() -> None:
+    # every key must come from its own source (mutation testing found swaps going unnoticed)
+    data = summarize(
+        [
+            ok(1, 4_000_000, 4.0, ttfb=2.0),
+            ok(2, 1_000_000, 1.0, ttfb=0.5),
+            ok(3, 2_000_000, 1.0, ttfb=0.5),
+        ]
+    ).to_dict()
+
+    assert data["transfer_speed_mbit_s"] == pytest.approx(7 / 3 * 8, abs=1e-4)  # 7 MB / 3 s
+    assert data["speed_excluding_first_mbit_s"] == 12.0  # 3 MB / 2 s
+    rt = data["request_time_s"]
+    assert (rt["min"], rt["median"], rt["max"]) == (1.0, 1.0, 4.0)
+    assert rt["p90"] == pytest.approx(3.4)
+
+
+def test_failed_request_to_dict() -> None:
+    data = failed(2).to_dict()
+
+    assert data["ok"] is False
+    assert data["speed_mbyte_s"] is None
+    assert data["error"] == "boom"

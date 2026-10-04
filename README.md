@@ -172,7 +172,7 @@ summary.to_dict()  # для JSONField / результата задачи
 
 ```bash
 uv sync
-uv run pytest --cov        # 95 тестов, покрытие ~98%
+uv run pytest --cov        # 106 тестов, покрытие ~99%
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 

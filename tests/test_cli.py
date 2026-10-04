@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from _http_server import FILE_SIZE, ServerState
+from rich.console import Console
 from typer.testing import CliRunner
 
 from net_speedmeter import __version__, cli
@@ -162,7 +163,7 @@ def test_human_numbers_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Avg request time  2.000 s" in out
     assert "median 1.000 s" in out
     assert "Speed             2.50 MB/s = 20.00 Mbit/s" in out
-    assert "Without #1        5.00 MB/s = 40.00 Mbit/s" in out
+    assert "Without #1        5.00 MB/s = 40.00 Mbit/s  (excludes connection set-up" in out
 
 
 def test_single_request_shows_no_spread(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,3 +265,27 @@ def test_version_flag() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_exit_code_values_are_stable() -> None:
+    # documented in --help and README; IntEnum would silently alias a duplicate value
+    assert [int(code) for code in ExitCode] == [0, 1, 2, 3, 4, 130]
+
+
+def test_json_mode_has_no_progress_even_on_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Console", lambda **kw: Console(force_terminal=True, **kw))
+    seen = fake_benchmark(monkeypatch, [ok(1)])
+
+    result = runner.invoke(app, [URL, "--json"])
+
+    assert seen["on_progress"] is None
+    json.loads(result.output)  # nothing but JSON on stdout
+
+
+def test_no_without_first_row_when_first_request_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_benchmark(monkeypatch, [failed(1), ok(2), ok(3)])
+
+    result = runner.invoke(app, [URL, "-n", "3"])
+
+    assert "2/3 succeeded" in result.output
+    assert "Without #1" not in result.output
