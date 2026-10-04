@@ -1,0 +1,77 @@
+[project]
+name = "net-speedmeter"
+version = "0.1.0"
+description = "CLI that measures download speed by fetching a heavy file N times sequentially."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "scrollDynasty" }]
+requires-python = ">=3.11"
+keywords = ["speedtest", "bandwidth", "httpx", "cli", "network"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Monitoring",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.28,<1.0",
+    "rich>=13",
+    "typer>=0.15",
+]
+
+[project.urls]
+Repository = "https://github.com/scrollDynasty/net-speedmeter"
+
+[project.scripts]
+net-speedmeter = "net_speedmeter.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-httpserver>=1.1.5",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "UP", "SIM", "RUF", "N", "C4", "PT", "RET", "TID", "PL", "S", "BLE",
+]
+ignore = ["PLR2004", "PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004"]
+# Typer maps every function parameter to a CLI option, so a long signature is the API.
+"src/net_speedmeter/cli.py" = ["PLR0917"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["net_speedmeter"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]
