@@ -25,6 +25,8 @@ def test_mbyte_uses_decimal_megabytes() -> None:
         (0, "0 B"),
         (999, "999 B"),
         (1_000, "1.00 kB"),
+        (999_999, "1.00 MB"),  # must not render as "1000.00 kB"
+        (1_000_000, "1.00 MB"),
         (14_679_474, "14.68 MB"),
         (146_794_740, "146.79 MB"),
         (2_500_000_000, "2.50 GB"),
@@ -42,6 +44,7 @@ def test_format_bytes(value: int, expected: str) -> None:
         (0.0004, "0.4 ms"),
         (0.045, "45.0 ms"),
         (0.9994, "999.4 ms"),
+        (0.99996, "1.000 s"),  # must not render as "1000.0 ms"
         (1.0, "1.000 s"),
         (12.3456, "12.346 s"),
     ],
