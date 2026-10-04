@@ -197,9 +197,11 @@ flowchart LR
 ```python
 from net_speedmeter import iter_benchmark, summarize
 
-summary = summarize(list(iter_benchmark("https://cdn.example.com/creative.jpg", count=5, timeout=10)))
-summary.throughput   # байт/с, None если все запросы упали
-summary.to_dict()    # готово для JSONField / результата задачи Celery
+summary = summarize(
+    list(iter_benchmark("https://cdn.example.com/creative.jpg", count=5, timeout=10))
+)
+summary.throughput  # байт/с, None если все запросы упали
+summary.to_dict()  # готово для JSONField / результата задачи Celery
 ```
 
 Набросок того, как это встроилось бы в мониторинг скорости отдачи лендингов и креативов. **Это не реализовано:**
