@@ -1,6 +1,6 @@
 [project]
 name = "net-speedmeter"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI that measures download speed by fetching a heavy file N times sequentially."
 readme = "README.md"
 license = "MIT"
