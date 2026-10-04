@@ -1,7 +1,6 @@
-from conftest import FILE_SIZE, ServerState
+from _http_server import FILE_SIZE, ServerState, closed_port_url
 
-from net_speedmeter.measure import iter_benchmark
-from net_speedmeter.stats import summarize
+from net_speedmeter import iter_benchmark, summarize
 
 
 def test_ten_sequential_downloads_over_a_real_socket(http_server: ServerState) -> None:
@@ -20,12 +19,12 @@ def test_ten_sequential_downloads_over_a_real_socket(http_server: ServerState) -
 
 def test_keepalive_reuses_a_single_connection(http_server: ServerState) -> None:
     list(iter_benchmark(http_server.url("/file"), count=10, keepalive=True))
-    assert http_server.connections == 1
+    assert http_server.connections_opened == 1
 
 
 def test_no_keepalive_opens_a_fresh_connection_per_request(http_server: ServerState) -> None:
     list(iter_benchmark(http_server.url("/file"), count=10, keepalive=False))
-    assert http_server.connections == 10
+    assert http_server.connections_opened == 10
 
 
 def test_connection_dropped_mid_body_is_reported(http_server: ServerState) -> None:
@@ -33,14 +32,14 @@ def test_connection_dropped_mid_body_is_reported(http_server: ServerState) -> No
 
     assert not result.ok
     assert result.error is not None
-    assert result.error.startswith("RemoteProtocolError")
+    # Linux/macOS report the early close as a protocol error, Windows may see a reset.
+    assert result.error.startswith(("RemoteProtocolError", "ReadError"))
 
 
-def test_unreachable_host_is_reported(http_server: ServerState) -> None:
-    # Port 9 (discard) on localhost is closed on CI runners and dev machines.
+def test_unreachable_host_is_reported() -> None:
     # Linux refuses immediately (ConnectError), Windows retries SYN until the
     # timeout (ConnectTimeout) - both must end up as a failed request.
-    (result,) = iter_benchmark("http://127.0.0.1:9/file", count=1, timeout=1.0)
+    (result,) = iter_benchmark(closed_port_url(), count=1, timeout=1.0)
 
     assert not result.ok
     assert result.status_code is None

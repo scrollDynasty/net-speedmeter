@@ -18,12 +18,13 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from net_speedmeter import __version__
+from net_speedmeter._version import __version__
 from net_speedmeter.measure import (
-    DEFAULT_CHUNK_SIZE,
     DEFAULT_COUNT,
     DEFAULT_TIMEOUT,
     DEFAULT_URL,
+    MAX_COUNT,
+    MIN_TIMEOUT,
     iter_benchmark,
     validate_url,
 )
@@ -31,21 +32,33 @@ from net_speedmeter.models import RequestResult, Summary
 from net_speedmeter.stats import summarize
 from net_speedmeter.units import format_bytes, format_duration, to_mbit_per_s, to_mbyte_per_s
 
+JSON_SCHEMA_VERSION = 1
+
 
 class ExitCode(IntEnum):
     OK = 0
     PARTIAL_FAILURE = 1
-    ALL_FAILED = 2  # also what Click uses for usage errors
-    ERROR = 3  # broken environment: bad proxy settings, missing CA bundle, ...
+    USAGE = 2  # reserved by Click for bad arguments
+    ALL_FAILED = 3
+    ERROR = 4  # broken environment: bad proxy settings, missing CA bundle, ...
     INTERRUPTED = 130  # conventional 128 + SIGINT
 
 
+EPILOG = (
+    "Examples:  net-speedmeter -n 3 | "
+    'net-speedmeter "https://speed.cloudflare.com/__down?bytes=25000000" | '
+    "net-speedmeter --json | jq .summary.speed_mbyte_s"
+    "\n\n"
+    "Exit codes: 0 all ok, 1 some requests failed, 2 bad arguments, "
+    "3 all requests failed, 4 environment error, 130 interrupted."
+)
+
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Measure download speed: fetch URL N times sequentially, then report the average "
-        "request time, downloaded volume and speed in Mbit/s and MB/s."
+        "request time, downloaded volume and speed in MB/s and Mbit/s."
     ),
 )
 
@@ -63,7 +76,7 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit
 
 
-@app.command()
+@app.command(epilog=EPILOG)
 def run(
     url: Annotated[
         str,
@@ -79,25 +92,22 @@ def run(
     ] = DEFAULT_URL,
     count: Annotated[
         int,
-        typer.Option("--count", "-n", min=1, max=1000, help="Number of sequential requests."),
+        typer.Option("--count", "-n", min=1, max=MAX_COUNT, help="Number of sequential requests."),
     ] = DEFAULT_COUNT,
     timeout: Annotated[
         float,
         typer.Option(
-            min=0.1, help="Timeout in seconds for each network operation (connect, each read)."
+            min=MIN_TIMEOUT,
+            help="Timeout in seconds for each network operation (connect, each read).",
         ),
     ] = DEFAULT_TIMEOUT,
     keepalive: Annotated[
         bool,
         typer.Option(
             "--keepalive/--no-keepalive",
-            help="Reuse one connection (default) or open a fresh one for every request.",
+            help="Reuse one connection or open a fresh one for every request.",
         ),
     ] = True,
-    chunk_size: Annotated[
-        int,
-        typer.Option(min=1024, help="Read buffer size in bytes."),
-    ] = DEFAULT_CHUNK_SIZE,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print machine-readable JSON instead of human output."),
@@ -114,9 +124,8 @@ def run(
 ) -> None:
     """Download URL several times in a row and report the average speed."""
     console = Console(highlight=False)
-    quiet = json_output
 
-    if not quiet:
+    if not json_output:
         mode = "keep-alive" if keepalive else "new connection per request"
         console.print(Text(f"net-speedmeter {__version__}", style="bold"))
         console.print(Text(f"URL:      {url}"), soft_wrap=True)
@@ -133,7 +142,7 @@ def run(
         TimeElapsedColumn(),
         console=console,
         transient=True,
-        disable=quiet or not console.is_terminal,
+        disable=json_output or not console.is_terminal,
     )
     with progress:
         task = progress.add_task("connecting", total=None)
@@ -147,31 +156,33 @@ def run(
                 count=count,
                 timeout=timeout,
                 keepalive=keepalive,
-                chunk_size=chunk_size,
                 # no per-chunk callback at all when nothing is rendered
                 on_progress=None if progress.disable else on_progress,
             ):
                 results.append(result)
                 progress.reset(task, description="connecting", total=None)
-                if not quiet:
+                if not json_output:
                     console.print(_format_result(result, count), soft_wrap=True)
         except KeyboardInterrupt:
             interrupted = True
-        except Exception as exc:
+        except Exception as exc:  # last-resort guard at the CLI boundary
             progress.stop()
             typer.echo(f"error: {type(exc).__name__}: {exc}", err=True)
-            raise typer.Exit(int(ExitCode.ERROR)) from exc
+            raise typer.Exit(ExitCode.ERROR) from exc
 
     summary = summarize(results)
-    if quiet:
-        typer.echo(json.dumps(_to_json(url, keepalive, interrupted, results, summary), indent=2))
+    if json_output:
+        report = _to_json(
+            url=url, keepalive=keepalive, interrupted=interrupted, results=results, summary=summary
+        )
+        typer.echo(json.dumps(report, indent=2))
     else:
-        _print_summary(console, summary, interrupted)
+        _print_summary(console, summary, keepalive=keepalive, interrupted=interrupted)
 
-    raise typer.Exit(int(_exit_code(summary, interrupted)))
+    raise typer.Exit(_exit_code(summary, interrupted=interrupted))
 
 
-def _exit_code(summary: Summary, interrupted: bool) -> ExitCode:
+def _exit_code(summary: Summary, *, interrupted: bool) -> ExitCode:
     if interrupted:
         return ExitCode.INTERRUPTED
     if summary.succeeded == 0:
@@ -179,6 +190,13 @@ def _exit_code(summary: Summary, interrupted: bool) -> ExitCode:
     if summary.failed:
         return ExitCode.PARTIAL_FAILURE
     return ExitCode.OK
+
+
+def _speed_pair(bytes_per_second: float) -> str:
+    return (
+        f"{to_mbyte_per_s(bytes_per_second):.2f} MB/s "
+        f"= {to_mbit_per_s(bytes_per_second):.2f} Mbit/s"
+    )
 
 
 def _format_result(result: RequestResult, count: int) -> Text:
@@ -192,23 +210,14 @@ def _format_result(result: RequestResult, count: int) -> Text:
         + f"{result.status_code}  {format_bytes(result.bytes_downloaded):>9}  "
         + f"{format_duration(result.request_time):>9}  "
         + f"TTFB {ttfb:>8}  "
-        + f"{to_mbit_per_s(speed):>8.2f} Mbit/s  {to_mbyte_per_s(speed):>7.2f} MB/s"
-    )
-
-
-def _speed_text(bytes_per_second: float | None) -> str:
-    if bytes_per_second is None:
-        return "n/a"
-    return (
-        f"{to_mbit_per_s(bytes_per_second):.2f} Mbit/s "
-        f"= {to_mbyte_per_s(bytes_per_second):.2f} MB/s"
+        + f"{to_mbyte_per_s(speed):>7.2f} MB/s  {to_mbit_per_s(speed):>8.2f} Mbit/s"
     )
 
 
 _LABEL_WIDTH = 18
 
 
-def _row(label: str, value: str, style: str = "", note: str = "") -> Text:
+def _row(label: str, value: str, *, style: str = "", note: str = "") -> Text:
     text = Text(f"{label:<{_LABEL_WIDTH}}", style="bold")
     text.append(value, style=style)
     if note:
@@ -216,51 +225,68 @@ def _row(label: str, value: str, style: str = "", note: str = "") -> Text:
     return text
 
 
-def _print_summary(console: Console, summary: Summary, interrupted: bool) -> None:
-    rows: list[Text] = []
-
+def _summary_rows(summary: Summary, *, keepalive: bool) -> list[Text]:
     requests = f"{summary.succeeded}/{summary.total} succeeded"
     if summary.failed:
         requests += f", {summary.failed} failed"
-    rows.append(_row("Requests", requests, style="red" if summary.failed else "green"))
-    rows.append(
-        _row("Downloaded", f"{format_bytes(summary.total_bytes)} ({summary.total_bytes:,} bytes)")
-    )
+    rows = [
+        _row("Requests", requests, style="red" if summary.failed else "green"),
+        _row("Downloaded", f"{format_bytes(summary.total_bytes)} ({summary.total_bytes:,} bytes)"),
+    ]
     if (rt := summary.request_time) is not None:
-        rows.append(_row("Avg request time", format_duration(rt.mean), style="bold"))
-        rows.append(
+        stdev = "n/a" if rt.stdev is None else format_duration(rt.stdev)
+        rows += [
+            _row("Avg request time", format_duration(rt.mean), style="bold"),
             _row(
                 "Spread",
                 f"min {format_duration(rt.minimum)}, median {format_duration(rt.median)}, "
-                f"max {format_duration(rt.maximum)}, stdev {format_duration(rt.stdev)}",
-            )
-        )
+                f"max {format_duration(rt.maximum)}, stdev {stdev}",
+            ),
+        ]
     if summary.ttfb is not None:
         rows.append(_row("Avg TTFB", format_duration(summary.ttfb.mean)))
+    if summary.throughput is None:
+        rows.append(_row("Speed", "n/a", style="red", note="no successful requests"))
+        return rows
+
     rows.append(
         _row(
             "Speed",
-            _speed_text(summary.throughput),
+            _speed_pair(summary.throughput),
             style="bold cyan",
-            note="total bytes / total time",
+            note="all requests: total bytes / total time",
         )
     )
-    rows.append(
-        _row("Body transfer", _speed_text(summary.transfer_throughput), note="excluding TTFB")
-    )
+    first = summary.first_request
+    if first is not None and summary.throughput_excluding_first is not None:
+        note = (
+            "#1 includes DNS+TCP+TLS and TCP slow start"
+            if keepalive
+            else "every request opens a new connection"
+        )
+        rows.append(_row("Without #1", _speed_pair(summary.throughput_excluding_first), note=note))
+    if summary.transfer_throughput is not None:
+        rows.append(
+            _row("Body transfer", _speed_pair(summary.transfer_throughput), note="excluding TTFB")
+        )
     if (sp := summary.speed) is not None:
         rows.append(
             _row(
                 "Per-request",
-                f"median {to_mbit_per_s(sp.median):.2f} / p90 {to_mbit_per_s(sp.p90):.2f} / "
-                f"min {to_mbit_per_s(sp.minimum):.2f} / max {to_mbit_per_s(sp.maximum):.2f} "
-                "Mbit/s",
+                f"median {to_mbyte_per_s(sp.median):.2f} / p90 {to_mbyte_per_s(sp.p90):.2f} / "
+                f"min {to_mbyte_per_s(sp.minimum):.2f} / max {to_mbyte_per_s(sp.maximum):.2f} "
+                "MB/s",
             )
         )
+    return rows
 
+
+def _print_summary(
+    console: Console, summary: Summary, *, keepalive: bool, interrupted: bool
+) -> None:
     console.print()
     console.print(Text("Summary", style="bold underline"))
-    for row in rows:
+    for row in _summary_rows(summary, keepalive=keepalive):
         console.print(row, soft_wrap=True)
     if interrupted:
         console.print(
@@ -268,69 +294,21 @@ def _print_summary(console: Console, summary: Summary, interrupted: bool) -> Non
         )
 
 
-def _round(value: float | None, digits: int = 6) -> float | None:
-    return None if value is None else round(value, digits)
-
-
-def _mbit(value: float | None) -> float | None:
-    return None if value is None else round(to_mbit_per_s(value), 4)
-
-
-def _mbyte(value: float | None) -> float | None:
-    return None if value is None else round(to_mbyte_per_s(value), 4)
-
-
 def _to_json(
+    *,
     url: str,
     keepalive: bool,
     interrupted: bool,
     results: list[RequestResult],
     summary: Summary,
 ) -> dict[str, Any]:
-    speed = summary.speed
-    request_time = summary.request_time
     return {
+        "schema_version": JSON_SCHEMA_VERSION,
         "url": url,
         "keepalive": keepalive,
         "interrupted": interrupted,
-        "requests": [
-            {
-                "index": r.index,
-                "ok": r.ok,
-                "status_code": r.status_code,
-                "bytes": r.bytes_downloaded,
-                "request_time_s": _round(r.request_time),
-                "ttfb_s": _round(r.ttfb),
-                "transfer_time_s": _round(r.transfer_time),
-                "speed_mbit_s": _mbit(r.speed),
-                "speed_mbyte_s": _mbyte(r.speed),
-                "error": r.error,
-            }
-            for r in results
-        ],
-        "summary": {
-            "total": summary.total,
-            "succeeded": summary.succeeded,
-            "failed": summary.failed,
-            "total_bytes": summary.total_bytes,
-            "avg_request_time_s": None if request_time is None else _round(request_time.mean),
-            "median_request_time_s": None if request_time is None else _round(request_time.median),
-            "stdev_request_time_s": None if request_time is None else _round(request_time.stdev),
-            "avg_ttfb_s": None if summary.ttfb is None else _round(summary.ttfb.mean),
-            "speed_mbit_s": _mbit(summary.throughput),
-            "speed_mbyte_s": _mbyte(summary.throughput),
-            "transfer_speed_mbit_s": _mbit(summary.transfer_throughput),
-            "transfer_speed_mbyte_s": _mbyte(summary.transfer_throughput),
-            "per_request_speed_mbit_s": None
-            if speed is None
-            else {
-                "mean": _mbit(speed.mean),
-                "median": _mbit(speed.median),
-                "p90": _mbit(speed.p90),
-                "min": _mbit(speed.minimum),
-                "max": _mbit(speed.maximum),
-            },
-        },
+        "requests": [r.to_dict() for r in results],
+        "summary": summary.to_dict(),
     }
 
 

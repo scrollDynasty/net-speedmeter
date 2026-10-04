@@ -204,9 +204,66 @@ def test_iter_benchmark_runs_requests_sequentially() -> None:
     assert sum(r.bytes_downloaded for r in results) == 10 * len(BODY)
 
 
-def test_iter_benchmark_rejects_non_positive_count() -> None:
-    with pytest.raises(ValueError, match="count"):
-        list(iter_benchmark(URL, count=0))
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"count": 0}, "count"),
+        ({"count": 1001}, "count"),
+        ({"timeout": 0.01}, "timeout"),
+    ],
+)
+def test_iter_benchmark_validates_arguments_eagerly(kwargs: dict[str, float], message: str) -> None:
+    # no list(): bad arguments must fail at call time, not on the first next()
+    with pytest.raises(ValueError, match=message):
+        iter_benchmark(URL, **kwargs)  # type: ignore[arg-type]
+
+
+def test_iter_benchmark_rejects_bad_url_eagerly() -> None:
+    with pytest.raises(ValueError, match="URL"):
+        iter_benchmark("ftp://example.test/file")
+
+
+def test_failed_status_still_records_timing() -> None:
+    with client_for(serve(b"busy", status=503)) as client:
+        result = measure_once(client, URL, index=1, clock=StepClock(0.5))
+
+    assert not result.ok
+    assert result.ttfb == pytest.approx(0.5)
+    assert result.request_time == pytest.approx(0.5)  # the body is not downloaded
+
+
+def test_body_longer_than_content_length_is_rejected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"Content-Length": "400"}, stream=ChunkedStream(b"x" * 500)
+        )
+
+    with client_for(handler) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert not result.ok
+    assert result.error == "incomplete body: got 500 of 400 bytes"
+
+
+def test_broken_redirect_is_a_failed_request_not_a_crash() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "http://[bad"})
+
+    with client_for(handler) as client:
+        result = measure_once(client, URL, index=1)
+
+    assert not result.ok
+    assert result.error is not None
+
+
+def test_build_client_applies_timeout_and_measurement_headers() -> None:
+    with build_client(timeout=2.5) as client:
+        pass
+
+    assert client.timeout.connect == 2.5
+    assert client.timeout.read == 2.5
+    assert client.follow_redirects is True
+    assert client.headers["Accept-Encoding"] == "identity"
 
 
 @pytest.mark.parametrize("url", ["https://example.com/a.jpg", "http://127.0.0.1:8080/file"])
@@ -220,9 +277,10 @@ def test_validate_url_rejects_garbage(url: str) -> None:
         validate_url(url)
 
 
-@pytest.mark.parametrize("header", [b"\xb2", b"12abc", b"-5"])
+@pytest.mark.parametrize("header", [b"\xb2", "٣".encode(), b"12abc", b"-5"])
 def test_malformed_content_length_is_ignored(header: bytes) -> None:
-    # b"\xb2" decodes to "²" (superscript two): str.isdigit() is True for it, int() is not.
+    # b"\xb2" decodes to "²" (superscript two) and "٣" is an Arabic-Indic
+    # digit: str.isdigit()/isdecimal() accept them, a valid Content-Length must not.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, headers=[(b"Content-Length", header)], stream=ChunkedStream(BODY)
