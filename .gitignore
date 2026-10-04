@@ -22,3 +22,7 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local secrets / parallel coverage data
+.env
+.coverage.*

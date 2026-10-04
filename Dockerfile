@@ -11,18 +11,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 # Dependencies first: this layer is cached until uv.lock changes.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
 COPY README.md LICENSE ./
 COPY src ./src
-RUN uv sync --locked --no-dev --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
 
 # --- runtime: just the interpreter and the venv, running as non-root ---
 FROM python:3.12-slim
-RUN useradd --create-home --uid 10001 app
-COPY --from=build --chown=app:app /app/.venv /app/.venv
+RUN useradd --no-create-home --uid 10001 app
+COPY --from=build --chown=10001:10001 /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
-USER app
+USER 10001
 # `docker stop` sends SIGINT => KeyboardInterrupt => partial summary instead of SIGKILL after 10 s
 STOPSIGNAL SIGINT
 ENTRYPOINT ["net-speedmeter"]
