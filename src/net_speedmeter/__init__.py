@@ -6,7 +6,7 @@ Library usage::
 
     summary = summarize(list(iter_benchmark("https://example.com/big.jpg", count=5)))
     summary.throughput  # bytes per second, or None if every request failed
-    summary.to_dict()   # JSON-ready, same schema as `net-speedmeter --json`
+    summary.to_dict()   # JSON-ready, the "summary" block of `net-speedmeter --json`
 """
 
 from net_speedmeter._version import __version__

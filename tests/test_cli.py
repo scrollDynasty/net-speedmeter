@@ -289,3 +289,14 @@ def test_no_without_first_row_when_first_request_failed(monkeypatch: pytest.Monk
 
     assert "2/3 succeeded" in result.output
     assert "Without #1" not in result.output
+
+
+def test_unexpected_bug_is_not_masked_as_environment_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_benchmark(monkeypatch, [], then=TypeError("a real bug"))
+
+    result = runner.invoke(app, [URL])
+
+    assert result.exit_code != ExitCode.ERROR
+    assert isinstance(result.exception, TypeError)  # traceback preserved

@@ -165,7 +165,9 @@ def run(
                     console.print(_format_result(result, count), soft_wrap=True)
         except KeyboardInterrupt:
             interrupted = True
-        except Exception as exc:  # last-resort guard at the CLI boundary
+        # Broken environment, e.g. a malformed HTTPS_PROXY (ValueError) or a missing
+        # SSL_CERT_FILE (OSError). Anything else is a bug and keeps its traceback.
+        except (ValueError, OSError) as exc:
             progress.stop()
             typer.echo(f"error: {type(exc).__name__}: {exc}", err=True)
             raise typer.Exit(ExitCode.ERROR) from exc
